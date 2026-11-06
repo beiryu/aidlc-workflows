@@ -58,7 +58,7 @@ import {
   PROTECTED_RESPONSE_REPLIES_MAX,
   PROTECTED_RESPONSE_WORDS_MAX_CHARS,
   writeProtectedResponse,
-  autonomyGranted,
+  isAutonomousMode,
   constructionCheckpointsApply,
   isNonAnswer,
   latestMainWorkflowStageRunFloorForProject,
@@ -405,6 +405,29 @@ function checkpointName(kind: ConstructionCheckpointKind): string {
 
 function proofRelativePath(unit: string, kind: ConstructionCheckpointKind): string {
   return `${PROOF_DIR}/${unit}/${kind}.json`;
+}
+
+// The person's "Continue automatically": the state says autonomous and their
+// latest grant on record (WORKFLOW_STARTED or AUTONOMY_MODE_SET, one frontier
+// row) set it. A checkpoint the agent approves under it needs no person.
+export function autonomyGranted(stateContent: string | null, grant: AuditShardEvent | null | undefined): boolean {
+  return isAutonomousMode(stateContent) && grant?.event === "AUTONOMY_MODE_SET" &&
+    auditBlockField(grant.block, "Mode") === "autonomous";
+}
+
+// The same grant read from the record (the main workflow's rows; an isolated
+// run's own rows are not the person's grant).
+export function autonomyGrantedOnRecord(
+  projectDir: string,
+  stateContent: string | null,
+  intent?: string,
+  space?: string,
+): boolean {
+  if (!isAutonomousMode(stateContent)) return false;
+  const frontier = maximalAttemptEvents(readAuditShardEvents(projectDir, intent, space).filter((row) =>
+    (row.event === "AUTONOMY_MODE_SET" || row.event === "WORKFLOW_STARTED") &&
+    !auditBlockField(row.block, "Workflow")?.startsWith("single-stage:")));
+  return autonomyGranted(stateContent, frontier.length === 1 ? frontier[0] : null);
 }
 
 function onlyLatest(rows: readonly AuditShardEvent[]): AuditShardEvent | null {

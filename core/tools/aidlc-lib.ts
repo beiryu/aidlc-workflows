@@ -7058,10 +7058,6 @@ interface PendingPersonLine {
   reply?: true;
 }
 
-function stillWaiting(entry: PendingPersonLine, now: number): boolean {
-  return entry.reply === true || now - entry.at <= PENDING_PERSON_LINES_MAX_AGE_MS;
-}
-
 interface PendingPersonLines {
   lines: PendingPersonLine[];
   // Lines this chat already heard on this work.
@@ -7098,7 +7094,7 @@ function readPendingPersonLines(path: string, turn: string, work: string): Pendi
       if (!entry || typeof entry !== "object") return false;
       const { line, at, turn: lineTurn } = entry as Partial<PendingPersonLine>;
       if (typeof line !== "string" || typeof at !== "number") return false;
-      return lineTurn === turn && stillWaiting(entry as PendingPersonLine, now);
+      return lineTurn === turn && ((entry as PendingPersonLine).reply === true || now - at <= PENDING_PERSON_LINES_MAX_AGE_MS);
     });
     const said = saved.work === work && Array.isArray(saved.said)
       ? saved.said.filter((line): line is string => typeof line === "string")
@@ -7191,7 +7187,7 @@ export function carryPendingPersonLines(projectDir: string, sessionId: string | 
       entry !== null && typeof entry === "object" &&
       typeof (entry as PendingPersonLine).line === "string" &&
       typeof (entry as PendingPersonLine).at === "number" &&
-      stillWaiting(entry as PendingPersonLine, now));
+      ((entry as PendingPersonLine).reply === true || now - (entry as PendingPersonLine).at <= PENDING_PERSON_LINES_MAX_AGE_MS));
     if (waiting.length === 0) return;
     const { turn, work } = personTurnAndWork(projectDir);
     // What this chat already heard belongs to the work it heard it on.
@@ -31352,29 +31348,6 @@ export type UnitGateRhythm = "per-stage" | "unit-end";
 
 export function isAutonomousMode(stateContent: string | null): boolean {
   return !!stateContent && getField(stateContent, AUTONOMY_MODE_FIELD)?.trim() === "autonomous";
-}
-
-// The person's "Continue automatically": the state says autonomous and their
-// latest grant on record (WORKFLOW_STARTED or AUTONOMY_MODE_SET, one frontier
-// row) set it. A checkpoint the agent approves under it needs no person.
-export function autonomyGranted(stateContent: string | null, grant: AuditShardEvent | null | undefined): boolean {
-  return isAutonomousMode(stateContent) && grant?.event === "AUTONOMY_MODE_SET" &&
-    auditBlockField(grant.block, "Mode") === "autonomous";
-}
-
-// The same grant read from the record (the main workflow's rows; an isolated
-// run's own rows are not the person's grant).
-export function autonomyGrantedOnRecord(
-  projectDir: string,
-  stateContent: string | null,
-  intent?: string,
-  space?: string,
-): boolean {
-  if (!isAutonomousMode(stateContent)) return false;
-  const frontier = maximalAttemptEvents(readAuditShardEvents(projectDir, intent, space).filter((row) =>
-    (row.event === "AUTONOMY_MODE_SET" || row.event === "WORKFLOW_STARTED") &&
-    !auditBlockField(row.block, "Workflow")?.startsWith("single-stage:")));
-  return autonomyGranted(stateContent, frontier.length === 1 ? frontier[0] : null);
 }
 
 export function readUnitGateRhythm(stateContent: string | null): UnitGateRhythm {

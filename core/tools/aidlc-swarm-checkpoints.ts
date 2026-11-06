@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { appendAuditEntries, appendAuditEntryUnlocked } from "./aidlc-audit.ts";
 import { personGitNameField } from "./aidlc-git-name.ts";
 import {
-  checkpointRecordForms, loadConstructionEvidence, type ApprovalFindingDispositions, type ConstructionEvidence,
-  type RejectedFindingDispositions,
+  autonomyGranted, checkpointRecordForms, loadConstructionEvidence, type ApprovalFindingDispositions,
+  type ConstructionEvidence, type RejectedFindingDispositions,
 } from "./aidlc-construction-checkpoints.ts";
 import { askedQuestionFields, QUESTION_ID_FIELD, questionShows } from "./aidlc-questions.ts";
 import { APPROVAL_GATE_CHOICES } from "./aidlc-reply-reader.ts";
@@ -33,7 +33,6 @@ import {
   mintProtectedQuestion,
   intentRepos,
   addPendingPersonLines,
-  autonomyGranted,
   isNonAnswer,
   latestMainWorkflowStageRunFloorForProject,
   maximalAttemptEvents,

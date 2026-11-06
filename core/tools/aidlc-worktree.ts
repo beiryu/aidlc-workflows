@@ -23,7 +23,6 @@ import { appendAuditEntry } from "./aidlc-audit.ts";
 import {
   addPendingPersonLines,
   auditBlockField,
-  autonomyGrantedOnRecord,
   BOLT_INTENT_ID8_REGEX,
   type BoltIdentity,
   BoltIdentityError,
@@ -95,7 +94,7 @@ import {
   asksForHelp,
   printUsageAndExit,
 } from "./aidlc-lib.js";
-import { afterApprovedSkeleton } from "./aidlc-construction-checkpoints.ts";
+import { afterApprovedSkeleton, autonomyGrantedOnRecord } from "./aidlc-construction-checkpoints.ts";
 import { quoted } from "./aidlc-brought-files.ts";
 import { mainCheckoutChangeStep } from "./aidlc-message-store.ts";
 import { swarmSourceChanged, swarmSourceChangedSince } from "./aidlc-swarm-source.ts";
