@@ -11,20 +11,25 @@
 // write the files it staged there, and the same merge lands it. A landing that git
 // does not start because a file it changes holds changes not committed in the
 // main checkout (an AI-DLC update to .gitignore) names the file and the step.
+// Under Continue automatically the agent approves the batch itself and goes on,
+// so the landing's settled-by-hand line, with its commit and the way back, is
+// kept for the reply the person reads, said once, and the merge's own output no
+// longer carries it; a gated run reads as before.
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendAuditEntry } from "../../dist/claude/.claude/tools/aidlc-audit.ts";
 import {
-  auditBlockField, boltSlugForUnit, readAuditShardEvents, workspaceSourceListing, writeBaselineSourceSnapshot,
+  auditBlockField, boltSlugForUnit, pendingPersonLines, readAuditShardEvents, workspaceSourceListing,
+  writeBaselineSourceSnapshot,
 } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import { codeGenerationRecordDir } from "../../dist/claude/.claude/tools/aidlc-testing-posture.ts";
 import {
   ISOLATED_GIT_ENV, STAGE, cleanupCheckpointFixtures, fixture, git, nextDirective, prepare, reviewRevisedSource,
   runCheckpointTool, swarm, wt, writeUnitSource,
 } from "../harness/swarm-checkpoint.ts";
-import { AIDLC_SRC } from "../harness/fixtures.ts";
+import { AIDLC_SRC, runOrchestrateNext, seededStateFile } from "../harness/fixtures.ts";
 import { testGuardEnvironment } from "../harness/runner-profile.ts";
 import { NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS, NATIVE_STARTUP_TIMEOUT_MS, remainingOperationTimeoutMs } from "../harness/test-budget.ts";
 
@@ -39,12 +44,59 @@ function land(pd: string, unit: string, target = "main") {
   ]);
 }
 
+// The chat the agent runs the landing in, as the host names it.
+const CHAT = "landing-reply";
+const inChat = (pd: string) => ({
+  ...ISOLATED_GIT_ENV, AIDLC_PROJECT_DIR: pd, CLAUDE_PROJECT_DIR: pd,
+  AIDLC_SESSION_OVERRIDE: CHAT, AIDLC_SESSION_OVERRIDE_SOURCE: "payload",
+});
+
+function landInChat(pd: string, unit: string, strategy = "squash") {
+  const r = Bun.spawnSync([process.execPath, join(AIDLC_SRC, "tools", "aidlc-worktree.ts"),
+    "merge", "--slug", boltSlugForUnit(unit), "--target", "main", "--strategy", strategy, "--project-dir", pd,
+  ], {
+    timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: pd, env: inChat(pd), stdout: "pipe", stderr: "pipe",
+  });
+  return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
+}
+
+// The person chose Continue automatically: the state says so and their grant is the latest on record.
+function continueAutomatically(pd: string): void {
+  const path = seededStateFile(pd);
+  writeFileSync(path, readFileSync(path, "utf-8").replace(
+    "- **Construction Autonomy Mode**: gated", "- **Construction Autonomy Mode**: autonomous",
+  ));
+  appendAuditEntry("AUTONOMY_MODE_SET", { Mode: "autonomous" }, pd);
+}
+
+// The reply the person reads: they ask to stop, and the park answers them.
+function parkReply(pd: string): Record<string, unknown> {
+  const human = Bun.spawnSync([process.execPath, join(AIDLC_SRC, "tools", "aidlc.ts"), "engine", "hook", "record-human-turn"], {
+    timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: pd, env: inChat(pd), stdout: "pipe", stderr: "pipe",
+    stdin: Buffer.from(JSON.stringify({
+      hook_event_name: "UserPromptSubmit", session_id: CHAT, prompt: "stop here for today please, park the work",
+    })),
+  });
+  expect(human.exitCode, human.stderr.toString()).toBe(0);
+  const park = Bun.spawnSync([process.execPath, join(AIDLC_SRC, "tools", "aidlc-orchestrate.ts"),
+    "park", "--person-asked", "--project-dir", pd,
+  ], {
+    timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: pd, env: inChat(pd), stdout: "pipe", stderr: "pipe",
+  });
+  expect(park.exitCode, `${park.stdout}\n${park.stderr}`).toBe(0);
+  return JSON.parse(park.stdout.toString().trim()) as Record<string, unknown>;
+}
+
+const noticesOf = (step: Record<string, unknown>): string[] =>
+  Array.isArray(step.change_notices) ? step.change_notices.map(String) : [];
+
 // alpha and beta each build their own file and write one shared file; alpha lands.
 function clashed(
   shared = "src/shared.ts",
   target = "main",
   change = (_unit: string, path: string, value: number) => writeFileSync(path, `export const shared = ${value};\n`),
   repo: string | null = null,
+  granted = false,
 ): string {
   const pd = fixture(["alpha", "beta"], undefined, false, repo);
   if (target !== "main") git(repo === null ? pd : join(pd, repo), ["branch", "-m", "main", target]);
@@ -63,7 +115,8 @@ function clashed(
   });
   const finalized = swarm(pd, ["finalize", "--batch", "1", "--units", "alpha,beta", "--claimed", "alpha,beta"]);
   expect(finalized.code, `${finalized.out}\n${finalized.err}`).toBe(0);
-  const first = land(pd, "alpha", target);
+  if (granted) continueAutomatically(pd);
+  const first = granted ? landInChat(pd, "alpha") : land(pd, "alpha", target);
   expect(first.code, `${first.out}\n${first.err}`).toBe(0);
   return pd;
 }
@@ -323,5 +376,60 @@ describe("a parallel landing that clashes in a sibling repository", () => {
     expect(auditBlockField(rows[1].block, "Landed changes")).toBe("repo-a/src/shared.ts");
     expect(guard(pd, "Write", write(shared)).code).toBe(2);
     expect((nextDirective(pd) as { kind: string }).kind).toBe("run-stage");
+  });
+});
+
+describe("under Continue automatically, a landing settled by hand is said in the person's next reply", () => {
+  // beta clashes with alpha in the main checkout; the agent combines both sides and runs the same merge again.
+  function settled(pd: string, strategy = "squash") {
+    expect(landInChat(pd, "beta", strategy).code).toBe(1);
+    writeFileSync(join(pd, "src", "shared.ts"), COMBINED);
+    git(pd, ["add", "src/shared.ts"]);
+    const landed = landInChat(pd, "beta", strategy);
+    expect(landed.code, `${landed.out}\n${landed.err}`).toBe(0);
+    return { err: landed.err, out: JSON.parse(landed.out) as { commit_sha: string; notices?: string[] } };
+  }
+  const line = (sha: string, revert = `git revert ${sha}`) =>
+    "Landed Unit beta with src/shared.ts settled by hand against what was already on main. " +
+    `\`git show ${sha} -- src/shared.ts\` shows how, and \`${revert}\` undoes the landing.`;
+
+  test("the reply names the files, the landing commit and the way back, once, and the steps on the way do not", () => {
+    const pd = clashed("src/shared.ts", "main", undefined, null, true);
+    // alpha landed with nothing settled by hand: nothing waits for the reply.
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([]);
+    const { err, out } = settled(pd);
+    const sha = out.commit_sha.slice(0, 12);
+    // The merge does not say it itself, so it is said once.
+    expect(out.notices ?? []).toEqual([]);
+    expect(err).not.toContain("settled by hand");
+    // The step the agent goes on with is not the reply.
+    const step = runOrchestrateNext(join(AIDLC_SRC, "tools", "aidlc-orchestrate.ts"), pd, [], { cwd: pd, env: inChat(pd) });
+    expect(step.status, step.out).toBe(0);
+    expect(noticesOf(step.directive ?? {}).join(" ")).not.toContain("settled by hand");
+    const reply = parkReply(pd);
+    expect(reply.kind).toBe("parked");
+    expect(noticesOf(reply).filter((said) => said === line(sha))).toHaveLength(1);
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([]);
+    // The way back is real: the commit shows the combination, and reverting it puts alpha's file back.
+    expect(git(pd, ["show", sha, "--", "src/shared.ts"])).toContain("+export const sharedBeta = 3;");
+    git(pd, ["-c", "user.name=t", "-c", "user.email=t@example.com", "revert", "--no-edit", sha]);
+    expect(readFileSync(join(pd, "src", "shared.ts"), "utf-8")).toBe("export const shared = 2;\n");
+  });
+
+  test("a landing made as a merge commit is undone with git revert -m 1", () => {
+    const pd = clashed("src/shared.ts", "main", undefined, null, true);
+    const { out } = settled(pd, "merge");
+    const sha = out.commit_sha.slice(0, 12);
+    expect(out.notices ?? []).toEqual([]);
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([line(sha, `git revert -m 1 ${sha}`)]);
+    git(pd, ["-c", "user.name=t", "-c", "user.email=t@example.com", "revert", "--no-edit", "-m", "1", sha]);
+    expect(readFileSync(join(pd, "src", "shared.ts"), "utf-8")).toBe("export const shared = 2;\n");
+  });
+
+  test("a gated run reads as before: the merge says the line itself, and nothing waits for the reply", () => {
+    const pd = clashed();
+    const { out } = settled(pd);
+    expect(out.notices).toEqual(["Landed Unit beta with src/shared.ts settled by hand against what was already on main."]);
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([]);
   });
 });
