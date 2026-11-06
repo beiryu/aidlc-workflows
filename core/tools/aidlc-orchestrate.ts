@@ -1550,8 +1550,9 @@ const carriesNarration = new WeakSet<Directive>();
 // Steps the agent speaks right after, with no line of their own (the print
 // that opens a stage's gate, before the gate is shown).
 const leadsToSpeech = new WeakSet<Directive>();
-// Gate prints the person is shown: the agent stops after one, so it is their
-// reply. A gate the agent approves itself is passed on its way.
+// Every awaiting-approval or revised gate print except one the agent approves
+// itself under Continue automatically (agentApprovesGate): the agent may stop
+// after it, so a line kept for the reply rides it.
 const personGatePrints = new WeakSet<Directive>();
 
 // A step the agent speaks from: one that ends its turn, or one with its own

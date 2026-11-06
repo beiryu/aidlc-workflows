@@ -25,7 +25,8 @@ import { appendAuditEntry } from "../../dist/claude/.claude/tools/aidlc-audit.ts
 import { verifyConstructionCheckpoint } from "../../dist/claude/.claude/tools/aidlc-construction-checkpoints.ts";
 import {
   approvedConstructionUnits, artifactFilename, auditBlockField, boltSlugForUnit, findStageBySlug,
-  latestMainWorkflowStageRunFloorForProject, pendingPersonLines, readAuditShardEvents, reviewArtifactFingerprint, setField,
+  addPendingPersonLines, latestMainWorkflowStageRunFloorForProject, pendingPersonLines, readAuditShardEvents,
+  reviewArtifactFingerprint, setField,
   unitMajorConstructionStageSlugs,
 } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import { seedBoltDagBatches, seededRecordDir, seededStateFile } from "../harness/fixtures.ts";
@@ -204,8 +205,9 @@ describe("the swarm's first landing after the approved walking skeleton", () => 
     expect(changesAccepted(pd)).toEqual([]);
   });
 
-  test("under Continue automatically, the gate the agent approves itself keeps its change line for the reply", async () => {
+  test("under Continue automatically, the gate the agent approves itself keeps its change lines for the reply, and a gate the person is shown says them", async () => {
     const line = "Files in the main checkout changed after the last unit was merged. Kept them.";
+    const earlier = "Landed Unit later with src/later.ts settled by hand against what was already on main.";
     const chat = "skeleton-reply";
     const inChat = (pd: string, file: string, args: string[]) => {
       const r = Bun.spawnSync([process.execPath, join(AIDLC_SRC, "tools", file), ...args, "--project-dir", pd], {
@@ -235,6 +237,8 @@ describe("the swarm's first landing after the approved walking skeleton", () => 
       }
       // A file in the main checkout changes after the last landing, as the agent's own fix did in the run.
       writeFileSync(join(pd, "src", "alpha.ts"), "export const alpha = 4;\n");
+      // A line an earlier step kept for the reply: a gate the person is shown is that reply.
+      if (!granted) expect(addPendingPersonLines(pd, chat, [earlier], { forReply: true })).toBe(true);
       const gate = inChat(pd, "aidlc-orchestrate.ts", ["report", "--stage", STAGE, "--result", "awaiting-approval"]);
       expect(gate.kind, JSON.stringify(gate)).toBe("print");
       const said = Array.isArray(gate.change_notices) ? gate.change_notices : [];
@@ -245,10 +249,16 @@ describe("the swarm's first landing after the approved walking skeleton", () => 
         expect(waiting).toContain("The project source could not be checked against the Code Generation review on this machine; carrying on.");
         expect(waiting.filter((kept) => !gatedSaid.includes(kept))).toEqual([]);
         expect(said.filter((kept) => waiting.includes(kept))).toEqual([]);
+        // The agent's own approval goes on to Build and Test: its step carries none of them either.
+        const approved = inChat(pd, "aidlc-orchestrate.ts", ["report", "--stage", STAGE, "--result", "approved"]);
+        expect(approved.kind, JSON.stringify(approved)).toBe("done");
+        expect(approved.change_notices ?? []).toEqual([]);
+        expect(pendingPersonLines(pd, chat, { atReply: true }).lines).toContain(line);
       } else {
         expect(said).toContain(line);
+        expect(said.filter((kept) => kept === earlier)).toHaveLength(1);
         expect(waiting).toEqual([]);
-        gatedSaid = said.map(String);
+        gatedSaid = said.map(String).filter((kept) => kept !== earlier);
       }
     }
   });
