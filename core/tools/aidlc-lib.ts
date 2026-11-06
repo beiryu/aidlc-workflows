@@ -7041,6 +7041,11 @@ export function takeSessionSelectionNotice(projectDir: string, sessionId: string
 // ends the wait, and nothing surfaces in another chat. The same file keeps,
 // per work, the lines this chat has already heard that the engine would
 // otherwise repeat (a finished stage that is out of date).
+//
+// A line kept for the reply (forReply) comes from a checkpoint the agent
+// approved itself under Continue automatically, where the next step it speaks
+// from is still the middle of a long turn. It waits for a step the agent stops
+// after, however long the turn runs, so it has no age limit.
 const PENDING_PERSON_LINES_MAX_AGE_MS = 15 * 60 * 1000;
 const PERSON_LINES_SAID_MAX = 20;
 
@@ -7049,6 +7054,12 @@ interface PendingPersonLine {
   at: number;
   // The person's turn the line belongs to.
   turn: string;
+  // Said only with the reply the person reads (a step the agent stops after).
+  reply?: true;
+}
+
+function stillWaiting(entry: PendingPersonLine, now: number): boolean {
+  return entry.reply === true || now - entry.at <= PENDING_PERSON_LINES_MAX_AGE_MS;
 }
 
 interface PendingPersonLines {
@@ -7087,7 +7098,7 @@ function readPendingPersonLines(path: string, turn: string, work: string): Pendi
       if (!entry || typeof entry !== "object") return false;
       const { line, at, turn: lineTurn } = entry as Partial<PendingPersonLine>;
       if (typeof line !== "string" || typeof at !== "number") return false;
-      return lineTurn === turn && now - at <= PENDING_PERSON_LINES_MAX_AGE_MS;
+      return lineTurn === turn && stillWaiting(entry as PendingPersonLine, now);
     });
     const said = saved.work === work && Array.isArray(saved.said)
       ? saved.said.filter((line): line is string => typeof line === "string")
@@ -7113,6 +7124,7 @@ export function addPendingPersonLines(
   projectDir: string,
   sessionId: string,
   lines: readonly string[],
+  options: { forReply?: boolean } = {},
 ): boolean {
   const path = pendingPersonLinesPath(projectDir, sessionId);
   const added = lines.filter((line) => line.trim().length > 0);
@@ -7121,7 +7133,7 @@ export function addPendingPersonLines(
   try {
     const saved = readPendingPersonLines(path, turn, work);
     const at = Date.now();
-    for (const line of added) saved.lines.push({ line, at, turn });
+    for (const line of added) saved.lines.push({ line, at, turn, ...(options.forReply ? { reply: true as const } : {}) });
     writePendingPersonLines(projectDir, path, work, saved);
     return true;
   } catch {
@@ -7129,19 +7141,29 @@ export function addPendingPersonLines(
   }
 }
 
-// The lines waiting for the next step the agent speaks from. `said()` clears
-// them once the step carries them; until then they stay waiting.
-export function pendingPersonLines(projectDir: string, sessionId: string): { lines: string[]; said(): void } {
+// The lines waiting for the next step the agent speaks from; a line kept for
+// the reply only when that step is one the agent stops after (`atReply`).
+// `said()` clears the lines handed out once the step carries them; until then
+// they stay waiting, and a reply line not handed out goes on waiting.
+export function pendingPersonLines(
+  projectDir: string,
+  sessionId: string,
+  options: { atReply?: boolean } = {},
+): { lines: string[]; reply: boolean; said(): void } {
   const path = pendingPersonLinesPath(projectDir, sessionId);
-  const none = { lines: [], said: () => {} };
+  const none = { lines: [], reply: false, said: () => {} };
   if (!path || !existsSync(path)) return none;
   const { turn, work } = personTurnAndWork(projectDir);
   const saved = readPendingPersonLines(path, turn, work);
+  const handed = saved.lines.filter((entry) => entry.reply !== true || options.atReply === true);
   return {
-    lines: saved.lines.map((entry) => entry.line),
+    lines: handed.map((entry) => entry.line),
+    // Whether a line kept for the reply is among them.
+    reply: handed.some((entry) => entry.reply === true),
     said: () => {
       try {
-        writePendingPersonLines(projectDir, path, work, { lines: [], said: saved.said });
+        const waiting = saved.lines.filter((entry) => !handed.includes(entry));
+        writePendingPersonLines(projectDir, path, work, { lines: waiting, said: saved.said });
       } catch {
         /* the next step says them again rather than never */
       }
@@ -7169,7 +7191,7 @@ export function carryPendingPersonLines(projectDir: string, sessionId: string | 
       entry !== null && typeof entry === "object" &&
       typeof (entry as PendingPersonLine).line === "string" &&
       typeof (entry as PendingPersonLine).at === "number" &&
-      now - (entry as PendingPersonLine).at <= PENDING_PERSON_LINES_MAX_AGE_MS);
+      stillWaiting(entry as PendingPersonLine, now));
     if (waiting.length === 0) return;
     const { turn, work } = personTurnAndWork(projectDir);
     // What this chat already heard belongs to the work it heard it on.
@@ -7177,7 +7199,7 @@ export function carryPendingPersonLines(projectDir: string, sessionId: string | 
       ? raw.said.filter((line): line is string => typeof line === "string")
       : [];
     writePendingPersonLines(projectDir, path, work, {
-      lines: waiting.map((entry) => ({ line: entry.line, at: entry.at, turn })),
+      lines: waiting.map((entry) => ({ line: entry.line, at: entry.at, turn, ...(entry.reply === true ? { reply: true as const } : {}) })),
       said,
     });
   } catch {
@@ -31330,6 +31352,29 @@ export type UnitGateRhythm = "per-stage" | "unit-end";
 
 export function isAutonomousMode(stateContent: string | null): boolean {
   return !!stateContent && getField(stateContent, AUTONOMY_MODE_FIELD)?.trim() === "autonomous";
+}
+
+// The person's "Continue automatically": the state says autonomous and their
+// latest grant on record (WORKFLOW_STARTED or AUTONOMY_MODE_SET, one frontier
+// row) set it. A checkpoint the agent approves under it needs no person.
+export function autonomyGranted(stateContent: string | null, grant: AuditShardEvent | null | undefined): boolean {
+  return isAutonomousMode(stateContent) && grant?.event === "AUTONOMY_MODE_SET" &&
+    auditBlockField(grant.block, "Mode") === "autonomous";
+}
+
+// The same grant read from the record (the main workflow's rows; an isolated
+// run's own rows are not the person's grant).
+export function autonomyGrantedOnRecord(
+  projectDir: string,
+  stateContent: string | null,
+  intent?: string,
+  space?: string,
+): boolean {
+  if (!isAutonomousMode(stateContent)) return false;
+  const frontier = maximalAttemptEvents(readAuditShardEvents(projectDir, intent, space).filter((row) =>
+    (row.event === "AUTONOMY_MODE_SET" || row.event === "WORKFLOW_STARTED") &&
+    !auditBlockField(row.block, "Workflow")?.startsWith("single-stage:")));
+  return autonomyGranted(stateContent, frontier.length === 1 ? frontier[0] : null);
 }
 
 export function readUnitGateRhythm(stateContent: string | null): UnitGateRhythm {

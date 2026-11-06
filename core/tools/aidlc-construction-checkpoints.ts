@@ -58,7 +58,7 @@ import {
   PROTECTED_RESPONSE_REPLIES_MAX,
   PROTECTED_RESPONSE_WORDS_MAX_CHARS,
   writeProtectedResponse,
-  isAutonomousMode,
+  autonomyGranted,
   constructionCheckpointsApply,
   isNonAnswer,
   latestMainWorkflowStageRunFloorForProject,
@@ -858,9 +858,7 @@ function snapshot(
   if (!enabled) errors.push("Construction Checkpoints: enabled requires solo Units with an in-scope source-producing stage.");
   if (stages.length === 0) errors.push("No applicable per-unit Construction stages.");
   if (!workflow) errors.push("A current, unambiguous WORKFLOW_STARTED record is required.");
-  const autonomous = isAutonomousMode(state) &&
-    grant?.event === "AUTONOMY_MODE_SET" &&
-    auditBlockField(grant.block, "Mode") === "autonomous";
+  const autonomous = autonomyGranted(state, grant);
   const humanRequired = kind === "skeleton" || !autonomous;
   const floors: Record<string, string> = {};
   const evidence: unknown[] = [];

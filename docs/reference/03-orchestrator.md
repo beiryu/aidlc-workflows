@@ -520,7 +520,15 @@ only before the work it describes keeps its own order in the step
 A rules part (`load-steering`) never takes them; its `run-stage` does. They
 belong to the person's current turn: a newer prompt on the work, or fifteen
 minutes with no prompt hook, drops them, so a line never surfaces later or in
-another chat. A line a tool gives inside a stage (`document-input`'s
+another chat. A line from a checkpoint the agent approves itself under Continue
+automatically (a landing's files settled by hand, with the landing commit and
+its `git show` and `git revert`; the batch approval's and Code Generation
+gate's change lines) is kept for the reply instead: it rides only a step the
+agent stops after (an `ask`, a gate the person is shown, `parked`,
+`present-gate`, a final `done` or a print it stops after), the prompt hook
+carries it into the person's next turn, and no time limit drops it. In a run
+where the person approves each checkpoint those lines stay on their own step.
+A line a tool gives inside a stage (`document-input`'s
 `selection_note` and `onboard_note`) is said by the stage as soon as it gets
 it, on a **SAY:** line in the stage file, next to the untrusted-path notice. Without a chat to keep them for, a line
 stays on its own step.

@@ -13,7 +13,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { AIDLC_SRC, cleanupTestProject, createOrchestrationTestProject, REPO_ROOT, runOrchestrateNext } from "../harness/fixtures.ts";
-import { addPendingPersonLines } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
+import { addPendingPersonLines, pendingPersonLines } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import { inputsNote, planNote } from "../../dist/claude/.claude/tools/aidlc-directive.ts";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
@@ -109,6 +109,39 @@ describe("t-lines-said-before-they-reply: the lines the person must hear ride ch
     expect(notices(step)).toContain(line);
     expect(String(step.narration ?? "")).not.toContain(line);
     expect(String(step.change_notices_note)).toContain(WHEN);
+  });
+
+  test("a line kept for the reply waits past the steps the agent passes and past the age limit, then rides the step it stops after, once", () => {
+    const proj = project();
+    created(proj, "poc", "build a lunch poll");
+    const reply = "Landed Unit beta with src/shared.ts settled by hand against what was already on main.";
+    const ordinary = "An ordinary line that waited too long.";
+    // Kept 20 minutes ago, as a long turn under Continue automatically does.
+    const realNow = Date.now;
+    Date.now = () => realNow() - 20 * 60 * 1000;
+    try {
+      expect(addPendingPersonLines(proj, SESSION, [reply], { forReply: true })).toBe(true);
+      expect(addPendingPersonLines(proj, SESSION, [ordinary])).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
+    // A step the agent speaks from on its way is not the reply.
+    const step = nextIn(proj);
+    expect(step.kind).toBe("run-stage");
+    expect(notices(step)).not.toContain(reply);
+    expect(notices(step)).not.toContain(ordinary);
+    // The step it stops after is.
+    const parked = spawnSync(BUN, [ORCH, "park", "--project-dir", proj], {
+      encoding: "utf-8", env: chat, timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+    });
+    expect(parked.status, `${parked.stdout}${parked.stderr}`).toBe(0);
+    const pause = JSON.parse(parked.stdout.trim()) as Record<string, unknown>;
+    expect(pause.kind).toBe("parked");
+    expect(notices(pause).filter((line) => line === reply)).toHaveLength(1);
+    expect(String(pause.change_notices_note)).toContain(WHEN);
+    // Said once; the line that waited too long as an ordinary one stays unsaid, as before.
+    expect(notices(pause)).not.toContain(ordinary);
+    expect(pendingPersonLines(proj, SESSION, { atReply: true }).lines).toEqual([]);
   });
 
   test("the one order is the same in every harness's tree: once, as written, before they reply", async () => {

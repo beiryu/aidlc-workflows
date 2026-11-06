@@ -426,6 +426,46 @@ describe("under Continue automatically, a landing settled by hand is said in the
     expect(readFileSync(join(pd, "src", "shared.ts"), "utf-8")).toBe("export const shared = 2;\n");
   });
 
+  // The run this was found in: Guard Policy off, the agent changes a file after the landing and approves the
+  // batch itself, and the person's next message asks to stop. Code Generation's own gate under the grant is
+  // t-swarm-after-skeleton-approves'.
+  test("the landing and the batch the agent approves both reach the one reply, each once", () => {
+    const pd = clashed("src/shared.ts", "main", undefined, null, true);
+    const path = seededStateFile(pd);
+    writeFileSync(path, readFileSync(path, "utf-8").replace(/^- \*\*Change Control\*\*: .*$/m, "- **Guard Policy**: off (set by you)"));
+    const { out } = settled(pd);
+    writeFileSync(join(pd, "src", "alpha.ts"), "export const alpha = 9;\n");
+    const approve = Bun.spawnSync([process.execPath, join(AIDLC_SRC, "tools", "aidlc-bolt.ts"),
+      "swarm-checkpoint", "--action", "approve", "--batch", "1", "--units", "alpha,beta", "--project-dir", pd,
+    ], {
+      timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: pd, env: inChat(pd), stdout: "pipe", stderr: "pipe",
+    });
+    expect(approve.exitCode, `${approve.stdout}\n${approve.stderr}`).toBe(0);
+    const batch = JSON.parse(approve.stdout.toString().trim()) as { approved: boolean; notices?: string[] };
+    expect(batch.approved).toBe(true);
+    expect(batch.notices ?? []).toEqual([]);
+    const reply = noticesOf(parkReply(pd));
+    expect(reply.filter((said) => said === line(out.commit_sha.slice(0, 12)))).toHaveLength(1);
+    expect(reply.filter((said) => said.startsWith("Files from the alpha Unit changed after its batch was checked:"))).toHaveLength(1);
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([]);
+  });
+
+  test("in a workspace of several repositories, the way back runs git in the Unit's own repository", () => {
+    const pd = clashed("src/shared.ts", "main", undefined, "repo-a", true);
+    const repo = join(pd, "repo-a");
+    expect(landInChat(pd, "beta").code).toBe(1);
+    writeFileSync(join(repo, "src", "shared.ts"), COMBINED);
+    git(repo, ["add", "src/shared.ts"]);
+    const landed = landInChat(pd, "beta");
+    expect(landed.code, `${landed.out}\n${landed.err}`).toBe(0);
+    const sha = (JSON.parse(landed.out) as { commit_sha: string }).commit_sha.slice(0, 12);
+    expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([
+      "Landed Unit beta with repo-a/src/shared.ts settled by hand against what was already on main. " +
+        `\`git -C repo-a show ${sha} -- src/shared.ts\` shows how, and \`git -C repo-a revert ${sha}\` undoes the landing.`,
+    ]);
+    expect(git(repo, ["show", sha, "--", "src/shared.ts"])).toContain("+export const sharedBeta = 3;");
+  });
+
   test("a gated run reads as before: the merge says the line itself, and nothing waits for the reply", () => {
     const pd = clashed();
     const { out } = settled(pd);
