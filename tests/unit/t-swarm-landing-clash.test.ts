@@ -11,10 +11,6 @@
 // write the files it staged there, and the same merge lands it. A landing that git
 // does not start because a file it changes holds changes not committed in the
 // main checkout (an AI-DLC update to .gitignore) names the file and the step.
-// Under Continue automatically the agent approves the batch itself and goes on,
-// so the landing's settled-by-hand line, with its commit and the way back, is
-// kept for the reply the person reads, said once, and the merge's own output no
-// longer carries it; a gated run reads as before.
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -349,36 +345,10 @@ describe("a parallel landing over changes not committed in the main checkout", (
   });
 });
 
-describe("a parallel landing that clashes in a sibling repository", () => {
-  test("the agent may combine the clashing file there, and the landing names it with its repository", () => {
-    const pd = clashed("src/shared.ts", "main", undefined, "repo-a");
-    const repo = join(pd, "repo-a");
-    const clash = JSON.parse(land(pd, "beta").out) as Clash;
-    expect(clash).toMatchObject({ status: "conflict", conflict_files: ["src/shared.ts"] });
-    expect(clash.detail).toContain(`it is staged in ${repo}`);
-    const shared = join(repo, "src", "shared.ts");
-    expect(guard(pd, "Write", write(shared)).code).toBe(0);
-    expect(guard(pd, "Edit", { file_path: shared, old_string: "<<<<<<< HEAD\n", new_string: "" }).code).toBe(0);
-    expect(guard(pd, "Write", write(join(repo, "src", "beta.ts"))).code).toBe(2);
-    // Dropped, the landing has nothing to combine; staged again, it clashes again.
-    git(repo, ["reset", "--merge"]);
-    expect(guard(pd, "Write", write(shared)).code).toBe(2);
-    expect(JSON.parse(land(pd, "beta").out) as Clash).toMatchObject({ status: "conflict", conflict_files: ["src/shared.ts"] });
-    writeFileSync(shared, COMBINED);
-    git(repo, ["add", "src/shared.ts"]);
-    const landed = land(pd, "beta");
-    expect(landed.code, `${landed.out}\n${landed.err}`).toBe(0);
-    expect((JSON.parse(landed.out) as { notices?: string[] }).notices)
-      .toEqual(["Landed Unit beta with repo-a/src/shared.ts settled by hand against what was already on main."]);
-    expect(readFileSync(shared, "utf-8")).toBe(COMBINED);
-    const rows = readAuditShardEvents(pd).filter((row) => row.event === "SWARM_SOURCE_MERGED");
-    expect(auditBlockField(rows[1].block, "Repo")).toBe("repo-a");
-    expect(auditBlockField(rows[1].block, "Landed changes")).toBe("repo-a/src/shared.ts");
-    expect(guard(pd, "Write", write(shared)).code).toBe(2);
-    expect((nextDirective(pd) as { kind: string }).kind).toBe("run-stage");
-  });
-});
-
+// Under Continue automatically the agent approves the batch itself and goes on,
+// so the landing's settled-by-hand line, with its commit and the way back, is
+// kept for the reply the person reads, said once, and the merge's own output no
+// longer carries it; a gated run reads as before.
 describe("under Continue automatically, a landing settled by hand is said in the person's next reply", () => {
   // beta clashes with alpha in the main checkout; the agent combines both sides and runs the same merge again.
   function settled(pd: string, strategy = "squash") {
@@ -471,5 +441,35 @@ describe("under Continue automatically, a landing settled by hand is said in the
     const { out } = settled(pd);
     expect(out.notices).toEqual(["Landed Unit beta with src/shared.ts settled by hand against what was already on main."]);
     expect(pendingPersonLines(pd, CHAT, { atReply: true }).lines).toEqual([]);
+  });
+});
+
+describe("a parallel landing that clashes in a sibling repository", () => {
+  test("the agent may combine the clashing file there, and the landing names it with its repository", () => {
+    const pd = clashed("src/shared.ts", "main", undefined, "repo-a");
+    const repo = join(pd, "repo-a");
+    const clash = JSON.parse(land(pd, "beta").out) as Clash;
+    expect(clash).toMatchObject({ status: "conflict", conflict_files: ["src/shared.ts"] });
+    expect(clash.detail).toContain(`it is staged in ${repo}`);
+    const shared = join(repo, "src", "shared.ts");
+    expect(guard(pd, "Write", write(shared)).code).toBe(0);
+    expect(guard(pd, "Edit", { file_path: shared, old_string: "<<<<<<< HEAD\n", new_string: "" }).code).toBe(0);
+    expect(guard(pd, "Write", write(join(repo, "src", "beta.ts"))).code).toBe(2);
+    // Dropped, the landing has nothing to combine; staged again, it clashes again.
+    git(repo, ["reset", "--merge"]);
+    expect(guard(pd, "Write", write(shared)).code).toBe(2);
+    expect(JSON.parse(land(pd, "beta").out) as Clash).toMatchObject({ status: "conflict", conflict_files: ["src/shared.ts"] });
+    writeFileSync(shared, COMBINED);
+    git(repo, ["add", "src/shared.ts"]);
+    const landed = land(pd, "beta");
+    expect(landed.code, `${landed.out}\n${landed.err}`).toBe(0);
+    expect((JSON.parse(landed.out) as { notices?: string[] }).notices)
+      .toEqual(["Landed Unit beta with repo-a/src/shared.ts settled by hand against what was already on main."]);
+    expect(readFileSync(shared, "utf-8")).toBe(COMBINED);
+    const rows = readAuditShardEvents(pd).filter((row) => row.event === "SWARM_SOURCE_MERGED");
+    expect(auditBlockField(rows[1].block, "Repo")).toBe("repo-a");
+    expect(auditBlockField(rows[1].block, "Landed changes")).toBe("repo-a/src/shared.ts");
+    expect(guard(pd, "Write", write(shared)).code).toBe(2);
+    expect((nextDirective(pd) as { kind: string }).kind).toBe("run-stage");
   });
 });
